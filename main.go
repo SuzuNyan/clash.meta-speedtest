@@ -103,11 +103,11 @@ func main() {
 	for _, name := range filteredProxies {
 		proxy := allProxies[name]
 		switch proxy.Type() {
-		case C.Shadowsocks, C.ShadowsocksR, C.Snell, C.Socks5, C.Http, C.Vmess, C.Trojan:
+		case C.Shadowsocks, C.ShadowsocksR, C.Snell, C.Socks5, C.Http, C.Vmess, C.Vless, C.Trojan, C.Hysteria, C.WireGuard, C.Tuic:
 			result := TestProxyConcurrent(name, proxy, *downloadSizeConfig, *timeoutConfig, *concurrent)
 			result.Printf(format)
 			results = append(results, *result)
-		case C.Direct, C.Reject, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
+		case C.Direct, C.Reject, C.Pass, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
 			continue
 		default:
 			log.Fatalln("Unsupported proxy type: %s", proxy.Type())
@@ -251,9 +251,15 @@ func TestProxy(name string, proxy C.Proxy, downloadSize int, timeout time.Durati
 				if err != nil {
 					return nil, err
 				}
+				var uint16Port uint16
+				if port,err:= strconv.ParseUint(port,10,16); err != nil {
+					return nil, err
+				}else{
+					uint16Port = uint16(port)
+				}
 				return proxy.DialContext(ctx, &C.Metadata{
 					Host:    host,
-					DstPort: port,
+					DstPort: uint16Port,
 				})
 			},
 		},
