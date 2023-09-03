@@ -252,9 +252,9 @@ func TestProxy(name string, proxy C.Proxy, downloadSize int, timeout time.Durati
 					return nil, err
 				}
 				var uint16Port uint16
-				if port,err:= strconv.ParseUint(port,10,16); err != nil {
+				if port, err := strconv.ParseUint(port, 10, 16); err != nil {
 					return nil, err
-				}else{
+				} else {
 					uint16Port = uint16(port)
 				}
 				return proxy.DialContext(ctx, &C.Metadata{
