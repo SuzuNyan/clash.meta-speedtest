@@ -68,7 +68,8 @@ func main() {
 		var body []byte
 		var err error
 		if strings.HasPrefix(configPath, "http") {
-			resp, err := http.Get(configPath)
+			var resp *http.Response
+			resp, err = http.Get(configPath)
 			if err != nil {
 				log.Warnln("failed to fetch config: %s", err)
 				continue
