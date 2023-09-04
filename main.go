@@ -37,7 +37,7 @@ var (
 
 type CProxy struct {
 	C.Proxy
-	SecretConfig any
+	RawNode yaml.Node
 }
 
 type Result struct {
@@ -53,7 +53,7 @@ var (
 
 type RawConfig struct {
 	Providers map[string]map[string]any `yaml:"proxy-providers"`
-	Proxies   []map[string]any          `yaml:"proxies"`
+	Proxies   []yaml.Node          `yaml:"proxies"`
 }
 
 func main() {
@@ -160,7 +160,7 @@ func filterProxies(filter string, proxies map[string]CProxy) []string {
 
 func loadProxies(buf []byte) (map[string]CProxy, error) {
 	rawCfg := &RawConfig{
-		Proxies: []map[string]any{},
+		Proxies: []yaml.Node{},
 	}
 	if err := yaml.Unmarshal(buf, rawCfg); err != nil {
 		return nil, err
@@ -169,8 +169,13 @@ func loadProxies(buf []byte) (map[string]CProxy, error) {
 	proxiesConfig := rawCfg.Proxies
 	providersConfig := rawCfg.Providers
 
-	for i, config := range proxiesConfig {
-		proxy, err := adapter.ParseProxy(config)
+	for i, node := range proxiesConfig {
+		decoded := make(map[string]any)
+		err := node.Decode(decoded)
+		if err != nil {
+			return nil, fmt.Errorf("proxy %d: %w", i, err)
+		}
+		proxy, err := adapter.ParseProxy(decoded)
 		if err != nil {
 			return nil, fmt.Errorf("proxy %d: %w", i, err)
 		}
@@ -178,7 +183,7 @@ func loadProxies(buf []byte) (map[string]CProxy, error) {
 		if _, exist := proxies[proxy.Name()]; exist {
 			return nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
 		}
-		proxies[proxy.Name()] = CProxy{Proxy: proxy, SecretConfig: config}
+		proxies[proxy.Name()] = CProxy{Proxy: proxy, RawNode: node}
 	}
 	for name, config := range providersConfig {
 		if name == provider.ReservedName {
@@ -334,10 +339,10 @@ func writeNodeConfigurationToYAML(filePath string, results []Result, proxies map
 	}
 	defer fp.Close()
 
-	var sortedProxies []any
+	var sortedProxies []yaml.Node
 	for _, result := range results {
 		if v, ok := proxies[result.Name]; ok {
-			sortedProxies = append(sortedProxies, v.SecretConfig)
+			sortedProxies = append(sortedProxies, v.RawNode)
 		}
 	}
 
