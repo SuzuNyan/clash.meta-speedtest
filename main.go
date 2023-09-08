@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -28,11 +29,15 @@ var (
 	livenessObject     = flag.String("l", "https://speed.cloudflare.com/__down?bytes=%d", "liveness object, support http(s) url, support payload too")
 	configPathConfig   = flag.String("c", "", "configuration file path, also support http(s) url")
 	filterRegexConfig  = flag.String("f", ".*", "filter proxies by name, use regexp")
-	downloadSizeConfig = flag.Int("size", 1024*1024*100, "download size for testing proxies")
+	downloadSizeConfig = flag.Int("size", 1024*1024*10, "download size for testing proxies")
 	timeoutConfig      = flag.Duration("timeout", time.Second*5, "timeout for testing proxies")
 	sortField          = flag.String("sort", "b", "sort field for testing proxies, b for bandwidth, t for TTFB")
 	output             = flag.String("output", "", "output result to csv/yaml file")
-	concurrent         = flag.Int("concurrent", 4, "download concurrent size")
+	concurrent         = flag.Int("concurrent", 1, "download concurrent size")
+	speed              = flag.Float64("speed", 1024, "target download speed (KB/s)")
+	speedCheckInterval = flag.Duration("speed-check-interval", time.Millisecond*100, "download speed check interval")
+	parrallel          = flag.Int("parrallel", 4, "parrallel test nodes")
+	downloadTime       = flag.Float64("downloadTime", 10.0, "Download for 10 FTTB")
 )
 
 type CProxy struct {
@@ -41,9 +46,11 @@ type CProxy struct {
 }
 
 type Result struct {
-	Name      string
-	Bandwidth float64
-	TTFB      time.Duration
+	Name         string
+	Bandwidth    float64
+	TTFB         time.Duration
+	MaxSpeed     float64
+	DownloadTime time.Duration
 }
 
 var (
@@ -53,7 +60,7 @@ var (
 
 type RawConfig struct {
 	Providers map[string]map[string]any `yaml:"proxy-providers"`
-	Proxies   []yaml.Node          `yaml:"proxies"`
+	Proxies   []yaml.Node               `yaml:"proxies"`
 }
 
 func main() {
@@ -96,24 +103,11 @@ func main() {
 	}
 
 	filteredProxies := filterProxies(*filterRegexConfig, allProxies)
-	results := make([]Result, 0, len(filteredProxies))
 
-	format := "%s%-42s\t%-12s\t%-12s\033[0m\n"
+	format := "%s%-22s\t%-12s\t%-12s\t%-12s\t%-12s\033[0m\n"
 
-	fmt.Printf(format, "", "节点", "带宽", "延迟")
-	for _, name := range filteredProxies {
-		proxy := allProxies[name]
-		switch proxy.Type() {
-		case C.Shadowsocks, C.ShadowsocksR, C.Snell, C.Socks5, C.Http, C.Vmess, C.Vless, C.Trojan, C.Hysteria, C.WireGuard, C.Tuic:
-			result := TestProxyConcurrent(name, proxy, *downloadSizeConfig, *timeoutConfig, *concurrent)
-			result.Printf(format)
-			results = append(results, *result)
-		case C.Direct, C.Reject, C.Pass, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
-			continue
-		default:
-			log.Fatalln("Unsupported proxy type: %s", proxy.Type())
-		}
-	}
+	fmt.Printf(format, "", "节点", "带宽", "Max速度", "延迟", "下载用时")
+	results := TestProxiesParrallel(filteredProxies, allProxies, format)
 
 	if *sortField != "" {
 		switch *sortField {
@@ -127,10 +121,15 @@ func main() {
 				return results[i].TTFB < results[j].TTFB
 			})
 			fmt.Println("\n\n===结果按照延迟排序===")
+		case "m", "maxSpeed":
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].MaxSpeed < results[j].MaxSpeed
+			})
+			fmt.Println("\n\n===结果按照单个连接测得的最大速度排序===")
 		default:
 			log.Fatalln("Unsupported sort field: %s", *sortField)
 		}
-		fmt.Printf(format, "", "节点", "带宽", "延迟")
+		fmt.Printf(format, "", "节点", "带宽", "Max速度", "延迟", "下载用时")
 		for _, result := range results {
 			result.Printf(format)
 		}
@@ -145,6 +144,24 @@ func main() {
 			log.Fatalln("Failed to write csv: %s", err)
 		}
 	}
+}
+
+func TestProxiesParrallel(filteredProxies []string, allProxies map[string]CProxy, format string) []Result {
+	results := make([]Result, 0, len(filteredProxies))
+	for _, name := range filteredProxies {
+		proxy := allProxies[name]
+		switch proxy.Type() {
+		case C.Shadowsocks, C.ShadowsocksR, C.Snell, C.Socks5, C.Http, C.Vmess, C.Vless, C.Trojan, C.Hysteria, C.WireGuard, C.Tuic:
+			result := TestProxyConcurrent(name, proxy, *downloadSizeConfig, *timeoutConfig, *concurrent)
+			result.Printf(format)
+			results = append(results, *result)
+		case C.Direct, C.Reject, C.Pass, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
+			continue
+		default:
+			log.Fatalln("Unsupported proxy type: %s", proxy.Type())
+		}
+	}
+	return results
 }
 
 func filterProxies(filter string, proxies map[string]CProxy) []string {
@@ -208,10 +225,10 @@ func (r *Result) Printf(format string) {
 	color := ""
 	if r.Bandwidth < 1024*1024 {
 		color = red
-	} else if r.Bandwidth > 1024*1024*10 {
+	} else if r.Bandwidth > *speed {
 		color = green
 	}
-	fmt.Printf(format, color, formatName(r.Name), formatBandwidth(r.Bandwidth), formatMilliseconds(r.TTFB))
+	fmt.Printf(format, color, formatName(r.Name), formatBandwidth(r.Bandwidth), formatBandwidth(r.MaxSpeed), formatMilliseconds(r.TTFB), formatMilliseconds(r.DownloadTime))
 }
 
 func TestProxyConcurrent(name string, proxy C.Proxy, downloadSize int, timeout time.Duration, concurrentCount int) *Result {
@@ -221,10 +238,14 @@ func TestProxyConcurrent(name string, proxy C.Proxy, downloadSize int, timeout t
 
 	chunkSize := downloadSize / concurrentCount
 	totalTTFB := int64(0)
+	totalDownloadTime := int64(0)
 	downloaded := int64(0)
+	var maxSpeed atomic.Value
+	maxSpeed.Store(float64(0))
 
 	var wg sync.WaitGroup
-	start := time.Now()
+
+	// start := time.Now()
 	for i := 0; i < concurrentCount; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -232,17 +253,32 @@ func TestProxyConcurrent(name string, proxy C.Proxy, downloadSize int, timeout t
 			if w != 0 {
 				atomic.AddInt64(&downloaded, w)
 				atomic.AddInt64(&totalTTFB, int64(result.TTFB))
+				atomic.AddInt64(&totalDownloadTime, int64(result.DownloadTime))
+				currentMax := maxSpeed.Load().(float64)
+				for currentMax < result.MaxSpeed {
+					if maxSpeed.CompareAndSwap(currentMax, result.MaxSpeed) {
+						break
+					} else {
+						currentMax = maxSpeed.Load().(float64)
+						continue
+					}
+				}
 			}
 			wg.Done()
 		}(i)
 	}
 	wg.Wait()
-	downloadTime := time.Since(start)
-
+	downloadTime := time.Duration(totalDownloadTime / int64(concurrentCount))
+	bandwidth := float64(downloaded) / downloadTime.Seconds()
+	if math.IsNaN(bandwidth) {
+		bandwidth = -1
+	}
 	result := &Result{
-		Name:      name,
-		Bandwidth: float64(downloaded) / downloadTime.Seconds(),
-		TTFB:      time.Duration(totalTTFB / int64(concurrentCount)),
+		Name:         name,
+		Bandwidth:    bandwidth,
+		TTFB:         time.Duration(totalTTFB / int64(concurrentCount)),
+		MaxSpeed:     maxSpeed.Load().(float64),
+		DownloadTime: downloadTime,
 	}
 
 	return result
@@ -274,22 +310,57 @@ func TestProxy(name string, proxy C.Proxy, downloadSize int, timeout time.Durati
 	start := time.Now()
 	resp, err := client.Get(fmt.Sprintf(*livenessObject, downloadSize))
 	if err != nil {
-		return &Result{name, -1, -1}, 0
+		return &Result{name, -1, -1, -1, -1}, 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode-http.StatusOK > 100 {
-		return &Result{name, -1, -1}, 0
+		return &Result{name, -1, -1, -1, -1}, 0
 	}
 	ttfb := time.Since(start)
+	checkTimer := time.NewTicker(*speedCheckInterval)
+	closeTimer := time.NewTimer(time.Duration(float64(ttfb) * *downloadTime))
 
-	written, _ := io.Copy(io.Discard, resp.Body)
-	if written == 0 {
-		return &Result{name, -1, -1}, 0
+	defer checkTimer.Stop()
+	defer closeTimer.Stop()
+
+	buffer := make([]byte, math.MaxUint16)
+	lastTick := time.Now()
+	maxSpeed := 0.0
+	totalBytesRead := int64(0)
+	prevBytesRead := int64(0)
+LOOP:
+	for {
+		select {
+		case current := <-checkTimer.C:
+			elapsedTime := time.Since(lastTick).Seconds()
+			downloadSpeed := float64(totalBytesRead-prevBytesRead) / elapsedTime
+			if downloadSpeed > maxSpeed {
+				maxSpeed = downloadSpeed
+				if *speed > 0 && maxSpeed > *speed*1024 {
+					break LOOP
+				}
+			}
+			lastTick = current
+			prevBytesRead = totalBytesRead
+		case <-closeTimer.C:
+			resp.Body.Close()
+			break LOOP
+		default:
+			n, err := resp.Body.Read(buffer)
+			if err == io.EOF {
+				// fmt.Println("Download completed.")
+				break LOOP
+			}
+			if err != nil {
+				fmt.Println("Error:", err)
+				return &Result{name, -1, -1, -1, -1}, 0
+			}
+			totalBytesRead += int64(n)
+		}
 	}
 	downloadTime := time.Since(start) - ttfb
-	bandwidth := float64(written) / downloadTime.Seconds()
-
-	return &Result{name, bandwidth, ttfb}, written
+	bandwidth := float64(totalBytesRead) / downloadTime.Seconds()
+	return &Result{name, bandwidth, ttfb, maxSpeed, downloadTime}, totalBytesRead
 }
 
 var (
@@ -367,7 +438,7 @@ func writeToCSV(filePath string, results []Result) error {
 	csvFile.WriteString("\xEF\xBB\xBF")
 
 	csvWriter := csv.NewWriter(csvFile)
-	err = csvWriter.Write([]string{"节点", "带宽 (MB/s)", "延迟 (ms)"})
+	err = csvWriter.Write([]string{"节点", "带宽 (MB/s)", "最大速度", "延迟 (ms)"})
 	if err != nil {
 		return err
 	}
@@ -375,6 +446,7 @@ func writeToCSV(filePath string, results []Result) error {
 		line := []string{
 			result.Name,
 			fmt.Sprintf("%.2f", result.Bandwidth/1024/1024),
+			fmt.Sprintf("%.2f", result.MaxSpeed/1024/1024),
 			strconv.FormatInt(result.TTFB.Milliseconds(), 10),
 		}
 		err = csvWriter.Write(line)
