@@ -22,7 +22,8 @@ import (
 	"github.com/Dreamacro/clash/adapter/provider"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/log"
-	"gopkg.in/yaml.v3"
+
+	"gopkg.in/yaml.v3" // replaced by "github.com/braydonk/yaml", check go.mod for details
 )
 
 var (
@@ -37,7 +38,7 @@ var (
 	speed              = flag.Float64("speed", 1024, "target download speed (KB/s)")
 	speedCheckInterval = flag.Duration("speed-check-interval", time.Millisecond*100, "download speed check interval")
 	parrallel          = flag.Int("parrallel", 4, "parrallel test nodes")
-	downloadTime       = flag.Float64("downloadTime", 10.0, "Download for 10 FTTB")
+	downloadTime       = flag.Float64("downloadTime", 10.0, "Download for serveral FTTB")
 )
 
 type CProxy struct {
@@ -108,7 +109,12 @@ func main() {
 
 	fmt.Printf(format, "", "节点", "带宽", "Max速度", "延迟", "下载用时")
 	results := TestProxiesParrallel(filteredProxies, allProxies, format)
-
+	lastResults := make([]*Result, 0, len(results))
+		for _, result := range results{
+			if result.Bandwidth > 0{
+				lastResults = append(lastResults, result)
+			}
+		}
 	if *sortField != "" {
 		switch *sortField {
 		case "b", "bandwidth":
@@ -130,38 +136,72 @@ func main() {
 			log.Fatalln("Unsupported sort field: %s", *sortField)
 		}
 		fmt.Printf(format, "", "节点", "带宽", "Max速度", "延迟", "下载用时")
-		for _, result := range results {
+		
+		for _, result := range lastResults {
 			result.Printf(format)
 		}
 	}
 
 	if strings.EqualFold(*output, "yaml") {
-		if err := writeNodeConfigurationToYAML("result.yaml", results, allProxies); err != nil {
+		if err := writeNodeConfigurationToYAML("result.yaml", lastResults, allProxies); err != nil {
 			log.Fatalln("Failed to write yaml: %s", err)
 		}
 	} else if strings.EqualFold(*output, "csv") {
-		if err := writeToCSV("result.csv", results); err != nil {
+		if err := writeToCSV("result.csv", lastResults); err != nil {
 			log.Fatalln("Failed to write csv: %s", err)
 		}
 	}
 }
 
-func TestProxiesParrallel(filteredProxies []string, allProxies map[string]CProxy, format string) []Result {
-	results := make([]Result, 0, len(filteredProxies))
-	for _, name := range filteredProxies {
-		proxy := allProxies[name]
-		switch proxy.Type() {
-		case C.Shadowsocks, C.ShadowsocksR, C.Snell, C.Socks5, C.Http, C.Vmess, C.Vless, C.Trojan, C.Hysteria, C.WireGuard, C.Tuic:
-			result := TestProxyConcurrent(name, proxy, *downloadSizeConfig, *timeoutConfig, *concurrent)
-			result.Printf(format)
-			results = append(results, *result)
-		case C.Direct, C.Reject, C.Pass, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
-			continue
-		default:
-			log.Fatalln("Unsupported proxy type: %s", proxy.Type())
-		}
+func TestProxiesParrallel(filteredProxies []string, allProxies map[string]CProxy, format string) []*Result {
+	results := make([]*Result, 0, len(filteredProxies))
+	var actualParrallel int
+	if *parrallel < 1 {
+		actualParrallel = 1
+	}else{
+		actualParrallel = *parrallel
 	}
+	ch := make(chan *Result, actualParrallel)
+	firstBundleSize := actualParrallel
+	if firstBundleSize > len(filteredProxies) {
+		firstBundleSize = len(filteredProxies)
+	}
+	runCounter := 0
+	runningCounter := 0
+	for n := 0; n < firstBundleSize; n++ {
+		go goproxy(ch, filteredProxies[n], allProxies[filteredProxies[n]])
+	}
+	runningCounter = firstBundleSize
+
+	for runCounter < len(filteredProxies) {
+		result := <-ch
+		results = append(results, result)
+		if result != nil {
+			result.Printf(format)
+		}
+		runCounter++
+		runningCounter--
+		if runningCounter+runCounter < len(filteredProxies) && runningCounter < *parrallel {
+			go goproxy(ch, filteredProxies[runCounter+runningCounter], allProxies[filteredProxies[runCounter+runningCounter]])
+			runningCounter++
+		}
+
+	}
+
 	return results
+}
+
+func goproxy(ch chan *Result, name string, proxy CProxy) {
+	switch proxy.Type() {
+	case C.Shadowsocks, C.ShadowsocksR, C.Snell, C.Socks5, C.Http, C.Vmess, C.Vless, C.Trojan, C.Hysteria, C.WireGuard, C.Tuic:
+		ch <- TestProxyConcurrent(name, proxy, *downloadSizeConfig, *timeoutConfig, *concurrent)
+	case C.Direct, C.Reject, C.Pass, C.Relay, C.Selector, C.Fallback, C.URLTest, C.LoadBalance:
+		ch <- nil
+	default:
+		log.Fatalln("Unsupported proxy type: %s", proxy.Type())
+		ch <- nil
+	}
+
 }
 
 func filterProxies(filter string, proxies map[string]CProxy) []string {
@@ -280,7 +320,6 @@ func TestProxyConcurrent(name string, proxy C.Proxy, downloadSize int, timeout t
 		MaxSpeed:     maxSpeed.Load().(float64),
 		DownloadTime: downloadTime,
 	}
-
 	return result
 }
 
@@ -404,7 +443,7 @@ func formatMilliseconds(v time.Duration) string {
 	return fmt.Sprintf("%.02fms", float64(v.Milliseconds()))
 }
 
-func writeNodeConfigurationToYAML(filePath string, results []Result, proxies map[string]CProxy) error {
+func writeNodeConfigurationToYAML(filePath string, results []*Result, proxies map[string]CProxy) error {
 	fp, err := os.Create(filePath)
 	if err != nil {
 		return err
@@ -427,7 +466,7 @@ func writeNodeConfigurationToYAML(filePath string, results []Result, proxies map
 	return err
 }
 
-func writeToCSV(filePath string, results []Result) error {
+func writeToCSV(filePath string, results []*Result) error {
 	csvFile, err := os.Create(filePath)
 	if err != nil {
 		return err

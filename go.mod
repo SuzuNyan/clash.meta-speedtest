@@ -89,4 +89,5 @@ require (
 	lukechampine.com/blake3 v1.2.1 // indirect
 )
 
+replace gopkg.in/yaml.v3 v3.0.1 => github.com/braydonk/yaml v0.7.0
 replace github.com/Dreamacro/clash v1.17.0 => github.com/MetaCubeX/Clash.Meta v1.15.1
